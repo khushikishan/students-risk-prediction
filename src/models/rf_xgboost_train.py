@@ -13,6 +13,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 PROCESSED = ROOT / "data" / "processed"
@@ -265,3 +266,219 @@ if __name__ == "__main__":
 
     summary_df = pd.DataFrame(summary_rows)
     print(summary_df.to_string(index=False))
+
+
+# To resolve feature groups, we define the expected columns for engagement, interaction, and assessment features.
+# These lists are used to filter the DataFrame columns and create subsets for ablation experiments.
+ASSESSMENT_FEATURE_COLS = [
+    "assessment_count",
+    "mean_score",
+    "min_score",
+    "max_score",
+    "std_score",
+    "latest_score",
+    "first_score",
+    "score_change",
+    "weighted_mean_score",
+    "late_submissions",
+]
+
+INTERACTION_FEATURE_COLS = [
+    "interaction_clicks",
+    "interaction_click_share",
+    "vle_clicks_forumng",
+    "vle_clicks_oucollaborate",
+    "vle_clicks_ouwiki",
+]
+
+ENGAGEMENT_SUMMARY_COLS = [
+    "total_vle_clicks",
+    "vle_event_count",
+    "active_vle_days",
+    "engagement_clicks",
+]
+
+
+def get_feature_groups(df: pd.DataFrame) -> dict[str, list[str]]:
+  """Resolves available columns for engagement, interaction, and assessment groups."""
+  numeric_cols = set(
+      c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])
+  )
+  exclude_cols = {
+      "code_module",
+      "code_presentation",
+      "id_student",
+      "cutoff",
+      "at_risk",
+      "multiclass_target",
+      "has_history",
+      "module_presentation_length",
+      "date_registration",
+      "date_unregistration",
+  }
+
+  interaction_cols = [
+      c for c in INTERACTION_FEATURE_COLS if c in numeric_cols and c not in exclude_cols
+  ]
+  assessment_cols = [
+      c for c in ASSESSMENT_FEATURE_COLS if c in numeric_cols and c not in exclude_cols
+  ]
+
+  interaction_set = set(interaction_cols)
+  assessment_set = set(assessment_cols)
+
+  engagement_cols = [
+      c
+      for c in df.columns
+      if c in numeric_cols
+      and c not in exclude_cols
+      and c not in interaction_set
+      and c not in assessment_set
+      and (c in ENGAGEMENT_SUMMARY_COLS or c.startswith("vle_clicks_"))
+  ]
+
+  return {
+      "engagement": engagement_cols,
+      "interaction": interaction_cols,
+      "assessment": assessment_cols,
+  }
+
+
+def build_ablation_subsets(groups: dict[str, list[str]]) -> dict[str, list[str]]:
+  """Builds single-group, two-group, and all-feature subsets for ablation."""
+  eng = groups["engagement"]
+  inter = groups["interaction"]
+  assess = groups["assessment"]
+
+  subsets = {
+      "engagement_only": eng,
+      "interaction_only": inter,
+      "assessment_only": assess,
+      "engagement_interaction": list(dict.fromkeys(eng + inter)),
+      "engagement_assessment": list(dict.fromkeys(eng + assess)),
+      "interaction_assessment": list(dict.fromkeys(inter + assess)),
+      "all_features": list(dict.fromkeys(eng + inter + assess)),
+  }
+  # Keep only non-empty subsets so runs don't fail if a group has 0 columns
+  return {name: cols for name, cols in subsets.items() if len(cols) > 0}
+
+
+# example usage: run_ablation_experiments(df, model_names=("rf", "xgb"), task="multiclass", n_trials=25, n_splits=10)
+
+def run_ablation_experiments(
+    df: pd.DataFrame,
+    model_names: tuple[str, ...] = ("rf", "xgb"),
+    task: str = "multiclass",
+    n_trials: int = 25,
+    n_splits: int = 10,
+    base_seed: int = 42,
+    n_estimators: int = 200,
+    n_jobs: int = 1,
+    summary_out_path: Path | None = None,
+    importances_out_path: Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+  """Runs feature-group ablation across all 5 cutoffs with progress logging
+
+  and incremental saving.
+  """
+  groups = get_feature_groups(df)
+  subsets = build_ablation_subsets(groups)
+
+  summary_rows = []
+  importance_rows = []
+  total_steps = len(CUTOFFS) * len(subsets) * len(model_names)
+  step_num = 0
+  run_start = time.perf_counter()
+
+  for cutoff in CUTOFFS:
+    for subset_name, subset_cols in subsets.items():
+      X_c, y_c = prepare_cutoff_xy(df, cutoff, subset_cols, task=task)
+      if len(y_c) == 0:
+        continue
+
+      for model_name in model_names:
+        step_num += 1
+        step_start = time.perf_counter()
+
+        trials_df, imp_df = run_cv_trials(
+            X=X_c,
+            y_raw=y_c,
+            model_name=model_name,
+            task=task,
+            n_trials=n_trials,
+            n_splits=n_splits,
+            base_seed=base_seed,
+            n_estimators=n_estimators,
+            n_jobs=n_jobs,
+        )
+
+        f1_mean = float(trials_df["f1"].mean())
+        auc_mean = float(trials_df["roc_auc"].mean())
+
+        summary_rows.append({
+            "cutoff": cutoff,
+            "feature_group": subset_name,
+            "n_features": len(subset_cols),
+            "model": model_name,
+            "precision_mean": float(trials_df["precision"].mean()),
+            "precision_std": float(trials_df["precision"].std()),
+            "recall_mean": float(trials_df["recall"].mean()),
+            "recall_std": float(trials_df["recall"].std()),
+            "f1_mean": f1_mean,
+            "f1_std": float(trials_df["f1"].std()),
+            "roc_auc_mean": auc_mean,
+            "roc_auc_std": float(trials_df["roc_auc"].std()),
+        })
+
+        if model_name == "rf" and not imp_df.empty:
+          feat_cols = [c for c in subset_cols if c in imp_df.columns]
+          mean_imps = imp_df[feat_cols].mean()
+          std_imps = imp_df[feat_cols].std()
+          for feat in feat_cols:
+            importance_rows.append({
+                "cutoff": cutoff,
+                "feature_group": subset_name,
+                "feature": feat,
+                "importance_mean": float(mean_imps[feat]),
+                "importance_std": float(std_imps[feat]),
+            })
+
+        summary_df = pd.DataFrame(summary_rows)
+        imp_summary_df = pd.DataFrame(importance_rows)
+
+        if summary_out_path is not None:
+          summary_df.to_csv(summary_out_path, index=False)
+        if importances_out_path is not None and not imp_summary_df.empty:
+          imp_summary_df.to_csv(importances_out_path, index=False)
+
+        step_elapsed = time.perf_counter() - step_start
+        total_elapsed = time.perf_counter() - run_start
+        print(
+            f"[{step_num}/{total_steps}] cutoff={cutoff}% | group={subset_name} | "
+            f"model={model_name} | F1={f1_mean:.4f} | AUC={auc_mean:.4f} | "
+            f"step={step_elapsed:.1f}s | total={total_elapsed:.1f}s",
+            flush=True,
+        )
+
+  return pd.DataFrame(summary_rows), pd.DataFrame(importance_rows)
+
+
+if __name__ == "__main__":
+  combined_path = PROCESSED / "combined_features.csv"
+  if combined_path.exists():
+    data = pd.read_csv(combined_path)
+    summary_df, rf_imp_df = run_ablation_experiments(
+        df=data,
+        model_names=("rf", "xgb"),
+        task="multiclass",
+        n_trials=25,
+        n_splits=10,
+        base_seed=42,
+        n_estimators=200,
+        n_jobs=1,
+        summary_out_path=PROCESSED / "multiclass_ablation_summary.csv",
+        importances_out_path=PROCESSED / "rf_ablation_feature_importances.csv",
+    )
+    print("Finished full ablation experiment.")
+    print("Summary shape:", summary_df.shape)
+    print("RF importances shape:", rf_imp_df.shape)

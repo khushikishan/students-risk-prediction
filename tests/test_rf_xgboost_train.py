@@ -123,3 +123,4 @@ def test_five_cutoffs_and_25_trials_output_structure(synthetic_dataset):
   combined_trials = pd.concat(all_results, ignore_index=True)
   assert set(combined_trials["cutoff"].unique()) == set(CUTOFFS)
   assert len(combined_trials) == len(CUTOFFS) * n_trials
+
