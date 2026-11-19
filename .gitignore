@@ -1,1 +1,19 @@
+# virtual environment
+.venv/
+venv/
+env/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macos
+.DS_Store
+
+# notebooks
+.ipynb_checkpoints/
+
+# raw datasets
 data/raw/*
+!data/raw/.gitkeep
