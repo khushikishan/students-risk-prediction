@@ -11,6 +11,11 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.naive_bayes import GaussianNB
+from sklearn.calibration import CalibratedClassifierCV
 from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier
 import time
@@ -71,6 +76,22 @@ def build_model(
         random_state=seed,
         n_jobs=n_jobs,
     )
+  if name == "lr":
+    return LogisticRegression(
+        max_iter=1000,
+        random_state=seed,
+    )
+  if name == "svm":
+    return CalibratedClassifierCV(
+        estimator=SVC(
+            kernel="rbf",
+            random_state=seed,
+        ),
+        cv=3,
+        ensemble=False,
+    )
+  if name == "nb":
+    return GaussianNB()
   raise ValueError(f"Unsupported model_name: {model_name}")
 
 
@@ -113,6 +134,11 @@ def run_cv_trials(
       imputer = SimpleImputer(strategy="median")
       X_tr_imp = imputer.fit_transform(X_tr_raw)
       X_va_imp = imputer.transform(X_va_raw)
+
+      if model_name.lower() in ("lr", "svm"):
+        scaler = StandardScaler()
+        X_tr_imp = scaler.fit_transform(X_tr_imp)
+        X_va_imp = scaler.transform(X_va_imp)
 
       smote = make_smote_for_fold(y_tr, random_state=trial_seed * 100 + fold_idx)
       if smote is not None:
