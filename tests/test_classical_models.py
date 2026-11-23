@@ -172,3 +172,59 @@ def test_scaling_only_uses_training_fold(monkeypatch):
 
     assert len(fit_sizes) == 5
     assert all(size == 48 for size in fit_sizes)
+
+
+def test_svm_calibration_with_rare_class(monkeypatch):
+    import src.models.rf_xgboost_train as train_mod
+
+    X = pd.DataFrame({
+        "feature_1": np.arange(12, dtype=float),
+        "feature_2": np.arange(12, dtype=float) * 2,
+    })
+    y = pd.Series([0] * 9 + [1] * 3)
+
+    calibration_folds = []
+    original_calibrator = train_mod.CalibratedClassifierCV
+
+    def spy_calibrator(*args, **kwargs):
+        calibration_folds.append(kwargs["cv"])
+        return original_calibrator(*args, **kwargs)
+
+    monkeypatch.setattr(
+        train_mod,
+        "CalibratedClassifierCV",
+        spy_calibrator,
+    )
+
+    results, _ = run_cv_trials(
+        X,
+        y,
+        model_name="svm",
+        task="binary",
+        n_trials=1,
+        n_splits=3,
+    )
+
+    assert calibration_folds == [2, 2, 2]
+    assert len(results) == 1
+
+
+def test_svm_calibration_single_sample_error():
+    X = pd.DataFrame({
+        "feature_1": np.arange(8, dtype=float),
+        "feature_2": np.arange(8, dtype=float) * 2,
+    })
+    y = pd.Series([0] * 6 + [1] * 2)
+
+    with pytest.raises(
+        ValueError,
+        match="SVM calibration requires at least 2 training samples per class",
+    ):
+        run_cv_trials(
+            X,
+            y,
+            model_name="svm",
+            task="binary",
+            n_trials=1,
+            n_splits=2,
+        )

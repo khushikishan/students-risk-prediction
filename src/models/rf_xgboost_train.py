@@ -146,14 +146,34 @@ def run_cv_trials(
       else:
         X_tr_fit, y_tr_fit = X_tr_imp, y_tr
 
-      clf = build_model(
-          model_name=model_name,
-          is_multiclass=is_multiclass,
-          n_classes=len(classes),
-          seed=trial_seed * 100 + fold_idx,
-          n_estimators=n_estimators,
-          n_jobs=n_jobs,
-      )
+      if model_name.lower() == "svm":
+        _, counts = np.unique(y_tr, return_counts=True)
+        min_count = int(counts.min())
+
+        if min_count < 2:
+          raise ValueError(
+              "SVM calibration requires at least 2 training samples per class."
+          )
+
+        calibration_folds = min(3, min_count)
+        clf = CalibratedClassifierCV(
+            estimator=SVC(
+                kernel="rbf",
+                random_state=trial_seed * 100 + fold_idx,
+            ),
+            cv=calibration_folds,
+            ensemble=False,
+        )
+      else:
+        clf = build_model(
+            model_name=model_name,
+            is_multiclass=is_multiclass,
+            n_classes=len(classes),
+            seed=trial_seed * 100 + fold_idx,
+            n_estimators=n_estimators,
+            n_jobs=n_jobs,
+        )
+
       clf.fit(X_tr_fit, y_tr_fit)
 
       y_pred = clf.predict(X_va_imp)
@@ -465,8 +485,8 @@ def run_ablation_experiments(
                 "cutoff": cutoff,
                 "feature_group": subset_name,
                 "feature": feat,
-                "importance_mean": float(mean_imps[feat]),
-                "importance_std": float(std_imps[feat]),
+                "importance_mean": mean_imps[feat],
+                "importance_std": std_imps[feat],
             })
 
         summary_df = pd.DataFrame(summary_rows)
