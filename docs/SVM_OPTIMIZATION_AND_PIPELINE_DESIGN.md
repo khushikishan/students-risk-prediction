@@ -1,7 +1,7 @@
 # SVM Optimization & Decoupled Ablation Pipeline Design
 
 ## Purpose
-This document records the engineering rationale behind separating Support Vector Machine (SVM) execution from the faster classifiers (`rf`, `xgb`, `lr`, `nb`), switching the default SVM solver from a kernelized RBF `SVC` to a calibrated `LinearSVC`, organizing multiclass execution into `src/runners/run_multiclass.py` while keeping binary execution separate, and adding step-level CSV checkpointing (`src/models/fast_ablation_pipeline.py`).
+This document records the engineering rationale behind separating Support Vector Machine (SVM) execution from the faster classifiers (`rf`, `xgb`, `lr`, `nb`), switching the default SVM solver from a kernelized RBF `SVC` to a calibrated `LinearSVC`, organizing multiclass and binary execution into separate runners under `src/models/runners/`, and adding step-level CSV checkpointing (`src/models/fast_ablation_pipeline.py`).
 
 ## Computational Bottleneck Observed
 During preliminary multiclass ablation runs (`n_trials=2, n_splits=5`) on OULAD across 5 cutoffs and 7 feature subsets, tree and linear models completed quickly per step (`rf`: ~62.7s, `xgb`: ~23.7s, `lr`: ~8.6s, `nb`: ~5.5s), whereas kernelized `SVC(kernel="rbf")` wrapped in `CalibratedClassifierCV(..., cv=3)` stalled on early steps.
@@ -21,7 +21,7 @@ Three compounding factors caused this bottleneck:
   - When a training fold has fewer than 2 samples in its smallest class (`min_count < 2`), the pipeline safely falls back to `decision_function` margin scores so cross-validation never crashes on rare splits.
 
 ### 2. Separating Fast Classifiers From the SVM Track & Isolating Task Workflows
-- **Change:** Decoupled model execution into `FAST_MODELS = ("rf", "xgb", "lr", "nb")` and `SVM_MODELS = ("svm",)`, with multiclass execution in `src/runners/run_multiclass.py` and binary execution kept separate in the teammate's binary script.
+- **Change:** Decoupled model execution into `FAST_MODELS = ("rf", "xgb", "lr", "nb")` and `SVM_MODELS = ("svm",)`, with separate binary and multiclass runners in `src/models/runners/`.
 - **Rationale:**
   - Prevents slow SVM sweeps from blocking completion or inspection of `rf`, `xgb`, `lr`, and `nb` results.
   - Preserves clear ownership and separate output files between `multiclass` (`multiclass_target`) and `binary` (`at_risk`) experiments.
@@ -41,11 +41,11 @@ All optimizations preserve the experimental protocol required for both binary an
 - Fits `SimpleImputer(strategy="median")`, `StandardScaler` (for `lr` and `svm`), and `SMOTE` strictly inside each training fold with zero validation leakage.
 - Supports `10-fold` cross-validation repeated across `25` independent random shuffles (`n_trials=25, n_splits=10`), reporting mean and standard deviation for precision, recall, F1, and ROC-AUC across all 5 course cutoffs (`20%–100%`) and 7 feature-group subsets for both `multiclass` and `binary` tasks.
 
-## Running Multiclass Experiment in Python (`src/runners/run_multiclass.py`)
+## Running the Multiclass Experiment (`src/models/runners/run_multiclass.py`)
 Call `run_multiclass_experiment` directly in Python for `task="multiclass"`:
 
 ```python
-from src.runners.run_multiclass import run_multiclass_experiment
+from src.models.runners.run_multiclass import run_multiclass_experiment
 
 # Quick sanity check across all 5 models
 run_multiclass_experiment(
@@ -73,3 +73,30 @@ run_multiclass_experiment(
     n_jobs=1,
     svm_kernel="linear",
 )
+
+```
+
+## Running the Binary Experiment (`src/models/runners/run_binary.py`)
+The binary runner uses `at_risk` as its target and has the same resumable `fast`, `svm`, and `all` tracks:
+
+```python
+from src.models.runners.run_binary import run_binary_experiment
+
+# Full binary sweep — fast models (rf, xgb, lr, nb)
+run_binary_experiment(
+    track="fast",
+    n_trials=25,
+    n_splits=10,
+    n_estimators=200,
+    n_jobs=1,
+)
+
+# Full binary sweep — SVM track
+run_binary_experiment(
+    track="svm",
+    n_trials=25,
+    n_splits=10,
+    n_jobs=1,
+    svm_kernel="linear",
+)
+```
