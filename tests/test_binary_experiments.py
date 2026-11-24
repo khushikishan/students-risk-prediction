@@ -227,3 +227,149 @@ def test_binary_experiment_defaults(tmp_path, monkeypatch):
     )
 
     assert len(calls) == 4
+
+
+def test_binary_experiment_preserves_aggregate_results(tmp_path, monkeypatch):
+    data = pd.DataFrame({
+        "cutoff": [20, 20, 20, 20, 40, 40, 40, 40],
+        "at_risk": [0, 1, 0, 1, 0, 1, 0, 1],
+        "feature_a": [1, 2, 3, 4, 5, 6, 7, 8],
+    })
+
+    data_path = tmp_path / "data.csv"
+    data.to_csv(data_path, index=False)
+
+    monkeypatch.setattr(
+        binary_experiments,
+        "get_feature_groups",
+        lambda df: {"assessment": ["feature_a"]},
+    )
+    monkeypatch.setattr(
+        binary_experiments,
+        "build_ablation_subsets",
+        lambda groups: {"all_features": ["feature_a"]},
+    )
+    monkeypatch.setattr(
+        binary_experiments,
+        "prepare_cutoff_xy",
+        lambda df, cutoff, feature_cols, task: (
+            df.loc[df["cutoff"] == cutoff, feature_cols],
+            df.loc[df["cutoff"] == cutoff, "at_risk"],
+        ),
+    )
+
+    calls = []
+
+    def fake_run_cv_trials(X, y, **kwargs):
+        calls.append(kwargs)
+        return (
+            pd.DataFrame({
+                "trial": [0, 1],
+                "precision": [0.7, 0.8],
+                "recall": [0.6, 0.7],
+                "f1": [0.65, 0.75],
+                "roc_auc": [0.75, 0.85],
+            }),
+            pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(
+        binary_experiments,
+        "run_cv_trials",
+        fake_run_cv_trials,
+    )
+
+    output_dir = tmp_path / "results"
+
+    trials, summary = binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        models=("lr",),
+        cutoffs=(20,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 1
+    assert len(trials) == 2
+    assert len(summary) == 1
+
+    original_results = (output_dir / "lr_20.csv").read_bytes()
+    original_config = (output_dir / "lr_20_config.json").read_bytes()
+
+    trials, summary = binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        models=("nb",),
+        cutoffs=(20,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 2
+    assert len(trials) == 4
+    assert len(summary) == 2
+    assert set(summary["model"]) == {"lr", "nb"}
+
+    trials, summary = binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        models=("lr",),
+        cutoffs=(40,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 3
+    assert len(trials) == 6
+    assert len(summary) == 3
+    assert set(summary["cutoff"]) == {20, 40}
+    assert set(zip(summary["model"], summary["cutoff"])) == {
+        ("lr", 20),
+        ("nb", 20),
+        ("lr", 40),
+    }
+
+    trials, summary = binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        models=("nb",),
+        cutoffs=(20,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 3
+    assert len(trials) == 6
+    assert len(summary) == 3
+    assert not trials.duplicated(subset=["model", "cutoff", "trial"]).any()
+    assert not summary.duplicated(subset=["model", "cutoff"]).any()
+
+    saved_trials = pd.read_csv(output_dir / "all_trials.csv")
+    saved_summary = pd.read_csv(output_dir / "summary.csv")
+
+    assert len(saved_trials) == 6
+    assert len(saved_summary) == 3
+
+    (output_dir / "all_trials.csv").unlink()
+    (output_dir / "summary.csv").unlink()
+
+    trials, summary = binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        models=("lr",),
+        cutoffs=(20,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 3
+    assert len(trials) == 6
+    assert len(summary) == 3
+
+    pd.testing.assert_frame_equal(
+        saved_trials,
+        pd.read_csv(output_dir / "all_trials.csv"),
+    )
+    pd.testing.assert_frame_equal(
+        saved_summary,
+        pd.read_csv(output_dir / "summary.csv"),
+    )
+
+    assert (output_dir / "lr_20.csv").read_bytes() == original_results
+    assert (output_dir / "lr_20_config.json").read_bytes() == original_config

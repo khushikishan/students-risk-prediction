@@ -119,6 +119,33 @@ def run_binary_experiments(
                 elapsed = time.perf_counter() - start
                 print(f"Completed in {elapsed:.1f}s", flush=True)
 
+    for cutoff in CUTOFFS:
+        for model in (*DEFAULT_MODELS, "svm"):
+            output_file = output_dir / f"{model}_{cutoff}.csv"
+            config_file = output_dir / f"{model}_{cutoff}_config.json"
+
+            if not output_file.exists():
+                continue
+
+            if not config_file.exists():
+                raise ValueError(
+                    f"Missing configuration for {output_file}."
+                )
+
+            saved_config = json.loads(config_file.read_text())
+
+            if saved_config["data_hash"] != data_hash:
+                raise ValueError(
+                    f"Dataset mismatch for {output_file}."
+                )
+
+            results = pd.read_csv(output_file)
+
+            if len(results) != saved_config["n_trials"]:
+                raise ValueError(
+                    f"Trial count mismatch for {output_file}."
+                )
+
             all_results.append(results)
 
             summary = {
