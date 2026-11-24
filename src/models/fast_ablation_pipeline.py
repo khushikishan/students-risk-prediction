@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import time
 
@@ -31,6 +33,117 @@ FAST_MODELS: tuple[str, ...] = ("rf", "xgb", "lr", "nb")
 SVM_MODELS: tuple[str, ...] = ("svm",)
 ALL_MODELS: tuple[str, ...] = ("rf", "xgb", "lr", "nb", "svm")
 SUPPORTED_TASKS: tuple[str, ...] = ("multiclass", "binary")
+SUPPORTED_MODELS: tuple[str, ...] = FAST_MODELS + SVM_MODELS
+
+
+def _dataframe_sha256(df: pd.DataFrame) -> str:
+  """Hash a DataFrame's values, column names, dtypes, and index for resume checks."""
+  digest = hashlib.sha256()
+  metadata = {
+      "columns": [str(column) for column in df.columns],
+      "dtypes": [str(dtype) for dtype in df.dtypes],
+  }
+  digest.update(json.dumps(metadata, sort_keys=True).encode("utf-8"))
+  digest.update(pd.util.hash_pandas_object(df, index=True).values.tobytes())
+  return digest.hexdigest()
+
+
+def _model_settings(
+    model_names: tuple[str, ...],
+    n_estimators: int,
+    n_jobs: int,
+    svm_kernel: str,
+    svm_calib_folds: int,
+) -> dict[str, dict]:
+  settings: dict[str, dict] = {}
+  for name in model_names:
+    if name == "rf":
+      settings[name] = {"n_estimators": n_estimators, "n_jobs": n_jobs}
+    elif name == "xgb":
+      settings[name] = {
+          "n_estimators": n_estimators,
+          "learning_rate": 0.05,
+          "max_depth": 6,
+          "n_jobs": n_jobs,
+      }
+    elif name == "lr":
+      settings[name] = {"max_iter": 1000}
+    elif name == "nb":
+      settings[name] = {"class_prior": None}
+    elif name == "svm":
+      settings[name] = {
+          "kernel": svm_kernel.lower(),
+          "C": 1.0,
+          "calibration_method": "sigmoid",
+          "max_calib_folds": svm_calib_folds,
+          "max_iter": 2000 if svm_kernel.lower() == "linear" else None,
+          "gamma": "scale" if svm_kernel.lower() == "rbf" else None,
+      }
+  return settings
+
+
+def _make_run_config(
+    df: pd.DataFrame,
+    model_names: tuple[str, ...],
+    task: str,
+    cutoffs: tuple[int, ...],
+    n_trials: int,
+    n_splits: int,
+    base_seed: int,
+    n_estimators: int,
+    n_jobs: int,
+    svm_kernel: str,
+    svm_calib_folds: int,
+    dataset_hash: str | None,
+) -> str:
+  normalized_models = tuple(str(name).lower() for name in model_names)
+  invalid_models = sorted(set(normalized_models) - set(SUPPORTED_MODELS))
+  if invalid_models:
+    raise ValueError(f"Unsupported models: {', '.join(invalid_models)}")
+
+  config = {
+      "config_version": 1,
+      "task": task,
+      "models": list(normalized_models),
+      "cutoffs": [int(cutoff) for cutoff in cutoffs],
+      "n_trials": int(n_trials),
+      "n_splits": int(n_splits),
+      "base_seed": int(base_seed),
+      "n_estimators": int(n_estimators),
+      "n_jobs": int(n_jobs),
+      "svm_kernel": svm_kernel.lower(),
+      "svm_calib_folds": int(svm_calib_folds),
+      "model_settings": _model_settings(
+          normalized_models,
+          n_estimators,
+          n_jobs,
+          svm_kernel,
+          svm_calib_folds,
+      ),
+      "dataset_sha256": dataset_hash or _dataframe_sha256(df),
+  }
+  return json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+def _validate_resume_config(
+    path: Path,
+    saved_rows: pd.DataFrame,
+    expected_config: str,
+    output_kind: str,
+) -> None:
+  if saved_rows.empty:
+    return
+  if "run_config" not in saved_rows.columns:
+    raise ValueError(
+        f"Existing {output_kind} file {path} has no run configuration. "
+        "Use a new output path to avoid reusing results with unknown settings."
+    )
+  saved_configs = set(saved_rows["run_config"].dropna().astype(str))
+  if saved_configs != {expected_config}:
+    raise ValueError(
+        f"Configuration mismatch for {path}. "
+        "Use a new output path or restore the matching dataset and settings."
+    )
 
 
 def build_svm_for_fold(
@@ -254,10 +367,27 @@ def run_ablation_with_resume(
     svm_calib_folds: int = 2,
     summary_out_path: Path | None = None,
     importances_out_path: Path | None = None,
+    dataset_hash: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
   """Run step-by-step ablation with incremental saving and automatic CSV resume."""
   if task not in SUPPORTED_TASKS:
     raise ValueError(f"Unsupported task: {task}")
+
+  model_names = tuple(str(name).lower() for name in model_names)
+  run_config = _make_run_config(
+      df=df,
+      model_names=model_names,
+      task=task,
+      cutoffs=cutoffs,
+      n_trials=n_trials,
+      n_splits=n_splits,
+      base_seed=base_seed,
+      n_estimators=n_estimators,
+      n_jobs=n_jobs,
+      svm_kernel=svm_kernel,
+      svm_calib_folds=svm_calib_folds,
+      dataset_hash=dataset_hash,
+  )
 
   groups = get_feature_groups(df)
   subsets = build_ablation_subsets(groups)
@@ -269,6 +399,12 @@ def run_ablation_with_resume(
   if summary_out_path is not None and summary_out_path.exists():
     existing_summary = pd.read_csv(summary_out_path)
     if not existing_summary.empty:
+      _validate_resume_config(
+          summary_out_path,
+          existing_summary,
+          run_config,
+          "summary",
+      )
       summary_rows = existing_summary.to_dict(orient="records")
       completed_keys = {
           (
@@ -283,6 +419,12 @@ def run_ablation_with_resume(
   if importances_out_path is not None and importances_out_path.exists():
     existing_imp = pd.read_csv(importances_out_path)
     if not existing_imp.empty:
+      _validate_resume_config(
+          importances_out_path,
+          existing_imp,
+          run_config,
+          "feature importance",
+      )
       importance_rows = existing_imp.to_dict(orient="records")
 
   total_steps = len(cutoffs) * len(subsets) * len(model_names)
@@ -326,6 +468,7 @@ def run_ablation_with_resume(
         auc_mean = float(trials_df["roc_auc"].mean())
 
         summary_rows.append({
+            "run_config": run_config,
             "task": task,
             "cutoff": cutoff,
             "feature_group": subset_name,
@@ -349,6 +492,7 @@ def run_ablation_with_resume(
           std_imps = imp_df[feat_cols].std()
           for feat in feat_cols:
             importance_rows.append({
+                "run_config": run_config,
                 "task": task,
                 "cutoff": cutoff,
                 "feature_group": subset_name,
