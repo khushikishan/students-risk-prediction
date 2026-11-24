@@ -12,6 +12,7 @@ from src.models.rf_xgboost_train import (
     build_ablation_subsets,
     run_cv_trials,
 )
+from src.models.fast_ablation_pipeline import run_cv_trials_fast
 
 
 DATA_PATH = Path("data/processed/combined_features.csv")
@@ -66,6 +67,10 @@ def run_binary_experiments(
                 "data_hash": data_hash,
             }
 
+            if model == "svm":
+                config["svm_kernel"] = "linear"
+                config["svm_calib_folds"] = 2
+
             if output_file.exists():
                 if not config_file.exists():
                     raise ValueError(
@@ -99,7 +104,14 @@ def run_binary_experiments(
 
                 start = time.perf_counter()
 
-                results, _ = run_cv_trials(
+                train_model = run_cv_trials_fast if model == "svm" else run_cv_trials
+
+                svm_settings = {
+                    "svm_kernel": config["svm_kernel"],
+                    "svm_calib_folds": config["svm_calib_folds"],
+                } if model == "svm" else {}
+
+                results, _ = train_model(
                     X,
                     y,
                     model_name=model,
@@ -108,6 +120,7 @@ def run_binary_experiments(
                     n_splits=n_splits,
                     n_estimators=n_estimators,
                     n_jobs=n_jobs,
+                    **svm_settings,
                 )
 
                 results.insert(0, "model", model)
@@ -134,9 +147,24 @@ def run_binary_experiments(
 
             saved_config = json.loads(config_file.read_text())
 
-            if saved_config["data_hash"] != data_hash:
+            config = {
+                "model": model,
+                "cutoff": cutoff,
+                "n_trials": n_trials,
+                "n_splits": n_splits,
+                "n_estimators": n_estimators,
+                "n_jobs": n_jobs,
+                "data_hash": data_hash,
+            }
+
+            if model == "svm":
+                config["svm_kernel"] = "linear"
+                config["svm_calib_folds"] = 2
+
+            if saved_config != config:
                 raise ValueError(
-                    f"Dataset mismatch for {output_file}."
+                    f"Configuration mismatch for {output_file}. "
+                    "Use a different output directory."
                 )
 
             results = pd.read_csv(output_file)
