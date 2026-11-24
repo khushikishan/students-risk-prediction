@@ -9,7 +9,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -108,11 +108,13 @@ def run_cv_trials(
     n_splits: int = 10,
     base_seed: int = 42,
     n_estimators: int = 200,
-    n_jobs: int = -1,
+    n_jobs: int = 1,
+    groups: pd.Series | np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-  """Evaluate a classifier over repeated stratified train/validation folds.
+  """Runs `n_trials` repetitions of stratified CV with SMOTE applied strictly
 
-  Fit preprocessing and apply SMOTE using each training fold only.
+  inside each training fold. Uses `StratifiedGroupKFold` when `groups` is
+  provided (e.g., pooling multiple cutoffs for the same student enrollment).
   """
   is_multiclass = task == "multiclass"
   encoder = LabelEncoder()
@@ -120,18 +122,27 @@ def run_cv_trials(
   classes = np.arange(len(encoder.classes_))
   X_arr = X.to_numpy(dtype=float)
   feature_names = list(X.columns)
+  groups_arr = np.asarray(groups) if groups is not None else None
 
   trial_rows = []
   importances_records = []
 
   for trial in range(n_trials):
     trial_seed = base_seed + trial
-    skf = StratifiedKFold(
-        n_splits=n_splits, shuffle=True, random_state=trial_seed
-    )
+    if groups_arr is not None:
+      splitter = StratifiedGroupKFold(
+          n_splits=n_splits, shuffle=True, random_state=trial_seed
+      )
+      split_iter = splitter.split(X_arr, y, groups=groups_arr)
+    else:
+      splitter = StratifiedKFold(
+          n_splits=n_splits, shuffle=True, random_state=trial_seed
+      )
+      split_iter = splitter.split(X_arr, y)
+
     fold_metrics = {"precision": [], "recall": [], "f1": [], "roc_auc": []}
 
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_arr, y)):
+    for fold_idx, (train_idx, val_idx) in enumerate(split_iter):
       X_tr_raw, y_tr = X_arr[train_idx], y[train_idx]
       X_va_raw, y_va = X_arr[val_idx], y[val_idx]
 

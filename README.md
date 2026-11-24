@@ -42,26 +42,31 @@ The features include assessment count, mean score, weighted mean score, minimum 
 
 Only assessments submitted by each cutoff are included. Submission dates are used as an approximation of when assessment scores become available.
 
-## Running the Code
+## Regenerating the Combined Feature Dataset
 
-From the project root, run the scripts in this order for processing the datasets:
+Place the OULAD source files in `data/raw/`: `studentInfo.csv`, `courses.csv`,
+`studentRegistration.csv`, `assessments.csv`, `studentAssessment.csv`,
+`studentVle.csv`, and `vle.csv`. From the project root, install dependencies
+and run the complete pipeline in order:
 
 ```bash
-python src/data_prep/explore_data.py
+python -m pip install -r requirements.txt
 python src/data_prep/preprocess.py
 python src/data_prep/targets.py
 python src/data_prep/assessment_features.py
-python src/data_prep/build_dataset.py
+python src/data_prep/engagement_interaction_features.py
 ```
 
-The generated files are going to be saved in `data/processed/` as:
+This creates `data/processed/combined_features.csv`, along with intermediate
+files `students_clean.csv`, `students_labeled.csv`, `assessment_features.csv`,
+and `engagement_interaction_features.csv`. Keep the same source data when
+resuming experiments that validate results against a dataset hash.
 
-- `students_clean.csv`
-- `students_labeled.csv`
-- `assessment_features.csv`
-- `student_features.csv`
+`src/data_prep/build_dataset.py` separately creates the assessment-focused
+`student_features.csv`; it is not part of the `combined_features.csv` pipeline.
 
-The final assessment-feature dataset contains 32,593 student enrollments across five cutoffs, giving 162,965 rows.
+The combined dataset contains student enrollment features across the five
+course cutoffs: 20%, 40%, 60%, 80%, and 100%.
 
 ## Testing
 
@@ -74,22 +79,29 @@ python -m pytest tests/test_data.py -v
 
 The tests check enrollment coverage, duplicate records, target labels, assessment counts, missing scores, score ranges, score changes, and assessment cutoff filtering.
 
-## Initial file structure
+## Initial file structure (modified)
 
-/project-2-risk-prediction
+students-risk-prediction/
+├── .env.example                                  # Template environment variables for collaborators
+├── .gitignore                                    # Ignores .env, __pycache__, and large local CSV outputs
+├── requirements.txt                              # Pinned Python dependencies
+├── README.md                                     # Setup instructions and pipeline overview
+├── PR_SUMMARY.md                                 # Pull request changelog and preliminary results
+├── docs/
+│   ├── FEATURE_GROUP_METHODOLOGY.md              # Engagement vs. interaction definitions & CV strategy
+│   └── FEATURE_ENGINEERING_TRADEOFFS.md          # Feature engineering choices & methodological tradeoffs
 ├── data/
-│   ├── raw/                 # Original OULAD CSVs (git-ignored)
-│   └── processed/           # Merged datasets ready for training
+│   ├── raw/                                      # Original OULAD CSV tables (studentInfo, studentVle, etc.)
+│   └── processed/
+│       ├── combined_features.csv                 # Engineered feature dataset across 5 course cutoffs
+│       ├── multiclass_ablation_summary.csv       # Incrementally saved CV metrics across all 70 steps
+│       └── rf_ablation_feature_importances.csv   # Mean/std Random Forest feature importances per cutoff
 ├── src/
-│   ├── data_prep/
-│   │   ├── feature_engineering.py
-│   │   └── temporal_cutoffs.py  # Generates the 20/40/60/80/100% data splits
-│   ├── models/
-│   │   ├── train_models.py      # Script to run Random Forest, XGBoost, SVM, LR, NB
-│   │   └── evaluate.py          # 25x 10-fold CV logic, SMOTE, and Metric calculation
-│   └── visualize/
-│       └── plot_metrics.py      # ROC-AUC graphs and ablation study plots
-├── notebooks/
-│   └── eda.ipynb            # Jupyter notebook for initial data exploration
-├── requirements.txt         # List of libraries
-└── README.md                # Project setup instructions
+│   ├── features/
+│   │   └── build_features.py                     # Raw OULAD aggregation and cutoff feature engineering
+│   └── models/
+│       └── rf_xgboost_train.py                   # Stratified/Group CV loop, SMOTE, and 70-step ablation
+└── tests/
+    ├── test_ablation_subsets.py                  # Verifies feature group partitioning and subsets
+    ├── test_group_isolation.py                   # Verifies StratifiedGroupKFold enrollment isolation
+    └── test_rf_xgboost_train.py                  # Unit tests for model training and fold metrics
