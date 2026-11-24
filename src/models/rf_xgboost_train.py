@@ -26,9 +26,9 @@ CUTOFFS = [20, 40, 60, 80, 100]
 
 
 def make_smote_for_fold(y_train: np.ndarray, random_state: int) -> SMOTE | None:
-  """Creates a SMOTE sampler safe for small fold minority counts, or None if
+  """Choose SMOTE settings from this fold's smallest class.
 
-  oversampling isn't feasible.
+  Return None when a minority class is too small to synthesize safely.
   """
   _, counts = np.unique(y_train, return_counts=True)
   if len(counts) < 2:
@@ -48,6 +48,10 @@ def build_model(
     n_estimators: int = 200,
     n_jobs: int = -1,
 ):
+  """Create the requested classifier with task-appropriate settings.
+
+  SVM calibration is adjusted per training fold inside `run_cv_trials`.
+  """
   name = model_name.lower()
   if name == "rf":
     return RandomForestClassifier(
@@ -106,9 +110,9 @@ def run_cv_trials(
     n_estimators: int = 200,
     n_jobs: int = -1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-  """Runs `n_trials` repetitions of stratified `n_splits`-fold CV with SMOTE
+  """Evaluate a classifier over repeated stratified train/validation folds.
 
-  applied strictly inside each training fold.
+  Fit preprocessing and apply SMOTE using each training fold only.
   """
   is_multiclass = task == "multiclass"
   encoder = LabelEncoder()
@@ -131,33 +135,67 @@ def run_cv_trials(
       X_tr_raw, y_tr = X_arr[train_idx], y[train_idx]
       X_va_raw, y_va = X_arr[val_idx], y[val_idx]
 
+      # Learn missing-value replacements from training rows, then reuse them.
+      # Validation values never influence imputation parameters.
       imputer = SimpleImputer(strategy="median")
       X_tr_imp = imputer.fit_transform(X_tr_raw)
       X_va_imp = imputer.transform(X_va_raw)
 
       if model_name.lower() in ("lr", "svm"):
+        # Scale only the imputed training fold and apply the same transform.
+        # This keeps validation statistics out of preprocessing.
         scaler = StandardScaler()
         X_tr_imp = scaler.fit_transform(X_tr_imp)
         X_va_imp = scaler.transform(X_va_imp)
 
+      # Resample training data only; validation remains at its natural balance.
       smote = make_smote_for_fold(y_tr, random_state=trial_seed * 100 + fold_idx)
       if smote is not None:
         X_tr_fit, y_tr_fit = smote.fit_resample(X_tr_imp, y_tr)
       else:
         X_tr_fit, y_tr_fit = X_tr_imp, y_tr
 
-      clf = build_model(
-          model_name=model_name,
-          is_multiclass=is_multiclass,
-          n_classes=len(classes),
-          seed=trial_seed * 100 + fold_idx,
-          n_estimators=n_estimators,
-          n_jobs=n_jobs,
-      )
+      svm_uncalibrated = False
+      if model_name.lower() == "svm":
+        _, counts = np.unique(y_tr, return_counts=True)
+        min_count = int(counts.min())
+
+        if min_count < 2:
+          # A singleton class cannot be split into calibration folds.
+          # Use the SVM's decision margins directly for ROC-AUC in this fold.
+          svm_uncalibrated = True
+          clf = SVC(
+              kernel="rbf",
+              random_state=trial_seed * 100 + fold_idx,
+          )
+        else:
+          calibration_folds = min(3, min_count)
+          clf = CalibratedClassifierCV(
+              estimator=SVC(
+                  kernel="rbf",
+                  random_state=trial_seed * 100 + fold_idx,
+              ),
+              cv=calibration_folds,
+              ensemble=False,
+          )
+      else:
+        clf = build_model(
+            model_name=model_name,
+            is_multiclass=is_multiclass,
+            n_classes=len(classes),
+            seed=trial_seed * 100 + fold_idx,
+            n_estimators=n_estimators,
+            n_jobs=n_jobs,
+        )
+
       clf.fit(X_tr_fit, y_tr_fit)
 
       y_pred = clf.predict(X_va_imp)
-      y_prob = clf.predict_proba(X_va_imp)
+      y_prob = (
+          clf.decision_function(X_va_imp)
+          if svm_uncalibrated
+          else clf.predict_proba(X_va_imp)
+      )
 
       metrics = evaluate_fold_metrics(
           y_true=y_va,
@@ -165,6 +203,7 @@ def run_cv_trials(
           y_prob=y_prob,
           is_multiclass=is_multiclass,
           classes=classes,
+          scores_are_margins=svm_uncalibrated,
       )
       for k, v in metrics.items():
         fold_metrics[k].append(v)
@@ -198,7 +237,12 @@ def evaluate_fold_metrics(
     y_prob: np.ndarray,
     is_multiclass: bool,
     classes: np.ndarray,
+    scores_are_margins: bool = False,
 ) -> dict[str, float]:
+  """Compute threshold metrics and ROC-AUC for one validation fold.
+
+  Margin scores are handled separately because they are not calibrated probabilities.
+  """
   avg = "macro" if is_multiclass else "binary"
   precision = precision_score(
       y_true, y_pred, average=avg, zero_division=0
@@ -208,15 +252,23 @@ def evaluate_fold_metrics(
 
   try:
     if is_multiclass:
-      roc_auc = roc_auc_score(
-          y_true,
-          y_prob,
-          multi_class="ovr",
-          average="macro",
-          labels=classes,
-      )
+      if scores_are_margins:
+        # SVM margins are per-class scores, so compute one-vs-rest AUC per class.
+        roc_auc = float(np.mean([
+            roc_auc_score(y_true == class_id, y_prob[:, class_id])
+            for class_id in classes
+        ]))
+      else:
+        roc_auc = roc_auc_score(
+            y_true,
+            y_prob,
+            multi_class="ovr",
+            average="macro",
+            labels=classes,
+        )
     else:
-      roc_auc = roc_auc_score(y_true, y_prob[:, 1])
+      positive_scores = y_prob if scores_are_margins else y_prob[:, 1]
+      roc_auc = roc_auc_score(y_true, positive_scores)
   except ValueError:
     roc_auc = np.nan
 
@@ -235,6 +287,10 @@ def prepare_cutoff_xy(
     feature_cols: list[str],
     task: str = "multiclass",
 ) -> tuple[pd.DataFrame, pd.Series]:
+  """Select features and labels for one course cutoff and prediction task.
+
+  Drop unlabeled rows for multiclass training while retaining binary labels.
+  """
   sub = df[df["cutoff"] == cutoff].copy()
   if task == "multiclass":
     sub = sub[sub["multiclass_target"] != -1].copy()
@@ -326,7 +382,10 @@ ENGAGEMENT_SUMMARY_COLS = [
 
 
 def get_feature_groups(df: pd.DataFrame) -> dict[str, list[str]]:
-  """Resolves available columns for engagement, interaction, and assessment groups."""
+  """Resolve the feature columns present in each domain group.
+
+  Exclude identifiers, targets, and other non-predictor fields.
+  """
   numeric_cols = set(
       c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])
   )
@@ -371,7 +430,10 @@ def get_feature_groups(df: pd.DataFrame) -> dict[str, list[str]]:
 
 
 def build_ablation_subsets(groups: dict[str, list[str]]) -> dict[str, list[str]]:
-  """Builds single-group, two-group, and all-feature subsets for ablation."""
+  """Build single-group, paired-group, and combined feature subsets.
+
+  Omit empty groups so ablation runs always receive usable inputs.
+  """
   eng = groups["engagement"]
   inter = groups["interaction"]
   assess = groups["assessment"]
@@ -403,9 +465,9 @@ def run_ablation_experiments(
     summary_out_path: Path | None = None,
     importances_out_path: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-  """Runs feature-group ablation across all 5 cutoffs with progress logging
+  """Compare feature-group subsets across all course cutoffs.
 
-  and incremental saving.
+  Report progress and save accumulated summaries as each run completes.
   """
   groups = get_feature_groups(df)
   subsets = build_ablation_subsets(groups)
@@ -465,8 +527,8 @@ def run_ablation_experiments(
                 "cutoff": cutoff,
                 "feature_group": subset_name,
                 "feature": feat,
-                "importance_mean": float(mean_imps[feat]),
-                "importance_std": float(std_imps[feat]),
+                "importance_mean": mean_imps[feat],
+                "importance_std": std_imps[feat],
             })
 
         summary_df = pd.DataFrame(summary_rows)
