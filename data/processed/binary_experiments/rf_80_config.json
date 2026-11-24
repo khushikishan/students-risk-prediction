@@ -1,0 +1,9 @@
+{
+  "model": "rf",
+  "cutoff": 80,
+  "n_trials": 25,
+  "n_splits": 10,
+  "n_estimators": 200,
+  "n_jobs": 1,
+  "data_hash": "59d3fff372152515eb07c3078410cc7e92d522c5dc4553c8d62ea0b211038e77"
+}
