@@ -11,12 +11,12 @@ To support early-warning intervention while preventing temporal data leakage, fe
 ## 2. Engineered Feature Families
 
 ### A. Engagement Features (General VLE Content & Activity Volume)
-Derived from `studentVle.csv` joined with `vle.csv` (`activity_type`), restricted to content consumption, navigation, and non-collaborative course resources:
+Derived from `studentVle.csv` joined with `vle.csv` (`activity_type`). Activity-specific engagement counts and `engagement_clicks` exclude the collaborative tool types, while broad activity totals include all logged VLE records:
 * **Aggregate Volume & Consistency:**
-  * `total_vle_clicks`: Total clicks recorded up to cutoff $c$.
-  * `vle_event_count`: Number of logged VLE interaction sessions/records up to cutoff $c$.
-  * `active_vle_days`: Count of distinct course days with at least one VLE click (captures regularity vs. cramming).
-  * `engagement_clicks`: Sum of clicks across non-collaborative activity types.
+  * `total_vle_clicks`: Total clicks across all activity types, including forum and collaborative tools, up to cutoff $c$.
+  * `vle_event_count`: Number of logged VLE records across all activity types up to cutoff $c$.
+  * `active_vle_days`: Count of distinct course days with at least one VLE click of any type (captures regularity vs. cramming).
+  * `engagement_clicks`: Sum of clicks across non-collaborative activity types only.
 * **Activity-Type Granularity (`vle_clicks_<activity_type>`):**
   * Individual click totals per VLE resource category (e.g., `vle_clicks_oucontent`, `vle_clicks_resource`, `vle_clicks_homepage`, `vle_clicks_subpage`, `vle_clicks_url`, `vle_clicks_quiz`, `vle_clicks_glossary`, `vle_clicks_dataplus`, etc.).
 
@@ -45,9 +45,10 @@ Derived from `studentAssessment.csv` joined with `assessments.csv` (`date`, `wei
   * *Loss:* Discards fine-grained temporal ordering and intra-session dynamics (e.g., whether a student clicks a resource *before* vs. *after* failing a quiz, or dwell time per page).
 
 ### 2. Defining Engagement vs. Interaction From Click Logs Alone
-* **Decision:** Partition VLE activity types into content/platform consumption (`engagement`) versus forum/wiki/collaborate tools (`interaction`), and compute `interaction_click_share`.
+* **Decision:** Separate activity-specific VLE click features into content/platform consumption (`engagement`) versus forum/wiki/collaborate tools (`interaction`), and compute `interaction_click_share`.
 * **Tradeoff:**
-  * *Gain:* Allows clean ablation testing (`engagement_only` vs. `interaction_only`) to quantify how much predictive power comes from peer/forum tools versus solo resource consumption.
+  * *Gain:* Supports ablation comparisons (`engagement_only` vs. `interaction_only`) of content-specific activity and peer/forum tools.
+  * *Caveat:* `total_vle_clicks`, `vle_event_count`, and `active_vle_days` aggregate all activity types, so the engagement-only group still carries some collaborative activity signal. The groups separate activity-specific columns, but they are not fully independent measures.
   * *Loss:* OULAD logs record *clicks*, not semantic actions (e.g., reading a forum thread vs. writing a substantive reply, or passive scrolling vs. active problem solving). Furthermore, LMS logs omit offline study (reading physical textbooks, local coding in an IDE, in-person peer help), so low click counts can reflect either disengagement or efficient offline study.
 
 ### 3. Temporal Cutoff Filtering vs. Early-Stage Missingness

@@ -20,6 +20,3 @@ __pycache__/
 # raw datasets
 data/raw/*
 !data/raw/.gitkeep
-
-# processed datasets and experiment outputs
-data/processed/*.csv

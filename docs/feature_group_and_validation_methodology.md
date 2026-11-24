@@ -2,12 +2,13 @@
 
 ## 1. Feature Group Definitions
 
-To isolate the predictive contribution of different behavioral and academic data sources across course progress cutoffs (`20%`, `40%`, `60%`, `80%`, `100%`), numeric features from `combined_features.csv` are partitioned into three disjoint groups:
+To compare the predictive contribution of different behavioral and academic data sources across course progress cutoffs (`20%`, `40%`, `60%`, `80%`, `100%`), numeric features from `combined_features.csv` are assigned to engagement, interaction, and assessment groups. The columns are partitioned by feature definition, but some aggregates overlap in what they measure.
 
 ### Engagement (`engagement_only`)
 Captures general Virtual Learning Environment (VLE) content consumption and overall platform activity volume:
 * **Aggregate Activity Features:** `total_vle_clicks`, `vle_event_count`, `active_vle_days`, `engagement_clicks`
 * **Activity-Specific VLE Clicks:** All non-collaborative/content `vle_clicks_*` columns (e.g., `vle_clicks_oucontent`, `vle_clicks_resource`, `vle_clicks_homepage`, `vle_clicks_subpage`, `vle_clicks_url`, `vle_clicks_quiz`, etc.)
+* **Overlap Note:** `total_vle_clicks`, `vle_event_count`, and `active_vle_days` summarize all logged VLE activity, including forum and collaborative tools. Thus, `engagement_only` includes some interaction signal through these broad aggregates, even though `engagement_clicks` and the listed activity-specific engagement columns exclude the collaborative activity types.
 * **Scope Note:** Reflects logged platform interactions rather than offline study habits (such as reading notes offline, local coding, or in-person study groups).
 
 ### Interaction (`interaction_only`)

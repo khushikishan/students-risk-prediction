@@ -42,26 +42,31 @@ The features include assessment count, mean score, weighted mean score, minimum 
 
 Only assessments submitted by each cutoff are included. Submission dates are used as an approximation of when assessment scores become available.
 
-## Running the Code
+## Regenerating the Combined Feature Dataset
 
-From the project root, run the scripts in this order for processing the datasets:
+Place the OULAD source files in `data/raw/`: `studentInfo.csv`, `courses.csv`,
+`studentRegistration.csv`, `assessments.csv`, `studentAssessment.csv`,
+`studentVle.csv`, and `vle.csv`. From the project root, install dependencies
+and run the complete pipeline in order:
 
 ```bash
-python src/data_prep/explore_data.py
+python -m pip install -r requirements.txt
 python src/data_prep/preprocess.py
 python src/data_prep/targets.py
 python src/data_prep/assessment_features.py
-python src/data_prep/build_dataset.py
+python src/data_prep/engagement_interaction_features.py
 ```
 
-The generated files are going to be saved in `data/processed/` as:
+This creates `data/processed/combined_features.csv`, along with intermediate
+files `students_clean.csv`, `students_labeled.csv`, `assessment_features.csv`,
+and `engagement_interaction_features.csv`. Keep the same source data when
+resuming experiments that validate results against a dataset hash.
 
-- `students_clean.csv`
-- `students_labeled.csv`
-- `assessment_features.csv`
-- `student_features.csv`
+`src/data_prep/build_dataset.py` separately creates the assessment-focused
+`student_features.csv`; it is not part of the `combined_features.csv` pipeline.
 
-The final assessment-feature dataset contains 32,593 student enrollments across five cutoffs, giving 162,965 rows.
+The combined dataset contains student enrollment features across the five
+course cutoffs: 20%, 40%, 60%, 80%, and 100%.
 
 ## Testing
 
