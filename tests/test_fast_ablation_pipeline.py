@@ -153,3 +153,53 @@ def test_resume_rejects_legacy_summary_without_configuration(
   assert calls == []
 
 
+def test_svm_does_not_validate_shared_rf_importance_file(
+    monkeypatch, tmp_path, small_binary_dataset
+):
+  calls = []
+  _install_fake_ablation_dependencies(monkeypatch, calls)
+  summary_path = tmp_path / "binary_svm_summary.csv"
+  importance_path = tmp_path / "shared_rf_importances.csv"
+  importance_path.write_text("run_config,feature\nold,feature_a\n", encoding="utf-8")
+  original_contents = importance_path.read_bytes()
+
+  _run_small_ablation(
+      small_binary_dataset,
+      summary_path,
+      importance_path,
+      model_names=("svm",),
+  )
+
+  assert len(calls) == 1
+  assert importance_path.read_bytes() == original_contents
+
+
+@pytest.mark.parametrize(
+    "task,labels",
+    [
+        ("binary", np.array([0, 1] * 30)),
+        ("multiclass", np.array([0, 1, 2] * 20)),
+    ],
+)
+def test_linear_svc_trains_for_binary_and_multiclass(task, labels):
+  rng = np.random.default_rng(42)
+  X = pd.DataFrame({
+      "feature_a": rng.normal(size=len(labels)),
+      "feature_b": rng.normal(size=len(labels)),
+  })
+  y = pd.Series(labels)
+
+  trials, _ = pipeline.run_cv_trials_fast(
+      X,
+      y,
+      model_name="svm",
+      task=task,
+      n_trials=1,
+      n_splits=3,
+      n_jobs=1,
+  )
+
+  assert len(trials) == 1
+  assert trials[["precision", "recall", "f1", "roc_auc"]].notna().all().all()
+
+

@@ -416,7 +416,11 @@ def run_ablation_with_resume(
           for r in summary_rows
       }
 
-  if importances_out_path is not None and importances_out_path.exists():
+  if (
+      "rf" in model_names
+      and importances_out_path is not None
+      and importances_out_path.exists()
+  ):
     existing_imp = pd.read_csv(importances_out_path)
     if not existing_imp.empty:
       _validate_resume_config(
