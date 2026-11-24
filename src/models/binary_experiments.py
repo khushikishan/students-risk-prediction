@@ -17,6 +17,7 @@ from src.models.rf_xgboost_train import (
 DATA_PATH = Path("data/processed/combined_features.csv")
 OUTPUT_DIR = Path("data/processed/binary_experiments")
 MODELS = ("lr", "svm", "nb", "rf", "xgb")
+DEFAULT_MODELS = ("lr", "nb", "rf", "xgb")
 CUTOFFS = (20, 40, 60, 80, 100)
 METRICS = ("precision", "recall", "f1", "roc_auc")
 
@@ -24,12 +25,12 @@ METRICS = ("precision", "recall", "f1", "roc_auc")
 def run_binary_experiments(
     data_path=DATA_PATH,
     output_dir=OUTPUT_DIR,
-    models=MODELS,
+    models=DEFAULT_MODELS,
     cutoffs=CUTOFFS,
     n_trials=25,
     n_splits=10,
     n_estimators=200,
-    n_jobs=-1,
+    n_jobs=1,
 ):
     df = pd.read_csv(data_path)
     data_hash = hashlib.sha256(Path(data_path).read_bytes()).hexdigest()
@@ -150,8 +151,8 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=25)
     parser.add_argument("--folds", type=int, default=10)
     parser.add_argument("--estimators", type=int, default=200)
-    parser.add_argument("--jobs", type=int, default=-1)
-    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
+    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS))
     parser.add_argument(
         "--cutoffs",
         nargs="+",

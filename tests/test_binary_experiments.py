@@ -118,7 +118,7 @@ def test_binary_experiment_trial_mismatch(tmp_path, monkeypatch):
         "n_trials": 2,
         "n_splits": 10,
         "n_estimators": 200,
-        "n_jobs": -1,
+        "n_jobs": 1,
         "data_hash": data_hash,
     }
 
@@ -153,3 +153,77 @@ def test_binary_experiment_trial_mismatch(tmp_path, monkeypatch):
             cutoffs=(20,),
             n_trials=2,
         )
+
+
+def test_binary_experiment_defaults(tmp_path, monkeypatch):
+    data = pd.DataFrame({
+        "cutoff": [20, 20, 20, 20],
+        "at_risk": [0, 1, 0, 1],
+        "feature_a": [1, 2, 3, 4],
+    })
+
+    data_path = tmp_path / "data.csv"
+    data.to_csv(data_path, index=False)
+
+    monkeypatch.setattr(
+        binary_experiments,
+        "get_feature_groups",
+        lambda df: {"assessment": ["feature_a"]},
+    )
+    monkeypatch.setattr(
+        binary_experiments,
+        "build_ablation_subsets",
+        lambda groups: {"all_features": ["feature_a"]},
+    )
+    monkeypatch.setattr(
+        binary_experiments,
+        "prepare_cutoff_xy",
+        lambda df, cutoff, feature_cols, task: (
+            df[feature_cols],
+            df["at_risk"],
+        ),
+    )
+
+    calls = []
+
+    def fake_run_cv_trials(X, y, **kwargs):
+        calls.append(kwargs)
+        return (
+            pd.DataFrame({
+                "trial": [0, 1],
+                "precision": [0.7, 0.8],
+                "recall": [0.6, 0.7],
+                "f1": [0.65, 0.75],
+                "roc_auc": [0.75, 0.85],
+            }),
+            pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(
+        binary_experiments,
+        "run_cv_trials",
+        fake_run_cv_trials,
+    )
+
+    output_dir = tmp_path / "results"
+
+    binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        cutoffs=(20,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 4
+    assert [call["model_name"] for call in calls] == ["lr", "nb", "rf", "xgb"]
+    assert all(call["n_jobs"] == 1 for call in calls)
+    assert not (output_dir / "svm_20.csv").exists()
+
+    binary_experiments.run_binary_experiments(
+        data_path=data_path,
+        output_dir=output_dir,
+        cutoffs=(20,),
+        n_trials=2,
+    )
+
+    assert len(calls) == 4
