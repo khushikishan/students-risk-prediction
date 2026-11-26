@@ -38,7 +38,8 @@ The preprocessing pipeline consists of the following scripts:
 - `src/data_prep/preprocess.py` — merges student information, course details, and registration data.
 - `src/data_prep/targets.py` — creates binary and multiclass classification labels.
 - `src/data_prep/assessment_features.py` — generates assessment features at different course cutoffs.
-- `src/data_prep/build_dataset.py` — combines student records and assessment features into one dataset.
+- `src/data_prep/engagement_interaction_features.py` — combines VLE and assessment features into `combined_features.csv`.
+- `src/data_prep/build_dataset.py` — separately creates the assessment-focused `student_features.csv`.
 
 ### Target Labels
 
@@ -101,29 +102,20 @@ python -m pytest tests/test_data.py -v
 
 The tests check enrollment coverage, duplicate records, target labels, assessment counts, missing scores, score ranges, score changes, and assessment cutoff filtering.
 
-## Initial file structure (modified)
+## Project Structure
 
 students-risk-prediction/
-├── .env.example                                  # Template environment variables for collaborators
-├── .gitignore                                    # Ignores .env, __pycache__, and large local CSV outputs
-├── requirements.txt                              # Pinned Python dependencies
-├── README.md                                     # Setup instructions and pipeline overview
-├── PR_SUMMARY.md                                 # Pull request changelog and preliminary results
-├── docs/
-│   ├── FEATURE_GROUP_METHODOLOGY.md              # Engagement vs. interaction definitions & CV strategy
-│   └── FEATURE_ENGINEERING_TRADEOFFS.md          # Feature engineering choices & methodological tradeoffs
 ├── data/
-│   ├── raw/                                      # Original OULAD CSV tables (studentInfo, studentVle, etc.)
-│   └── processed/
-│       ├── combined_features.csv                 # Engineered feature dataset across 5 course cutoffs
-│       ├── multiclass_ablation_summary.csv       # Incrementally saved CV metrics across all 70 steps
-│       └── rf_ablation_feature_importances.csv   # Mean/std Random Forest feature importances per cutoff
+│   ├── raw/                                      # Original OULAD CSVs (not committed)
+│   └── processed/                                # Processed datasets and experiment results
+├── docs/
+│   ├── SVM_OPTIMIZATION_AND_PIPELINE_DESIGN.md
+│   ├── feature_engineering_methodology_and_tradeoffs.md
+│   └── feature_group_and_validation_methodology.md
 ├── src/
-│   ├── features/
-│   │   └── build_features.py                     # Raw OULAD aggregation and cutoff feature engineering
+│   ├── data_prep/                                # Target and feature generation
 │   └── models/
-│       └── rf_xgboost_train.py                   # Stratified/Group CV loop, SMOTE, and 70-step ablation
-└── tests/
-    ├── test_ablation_subsets.py                  # Verifies feature group partitioning and subsets
-    ├── test_group_isolation.py                   # Verifies StratifiedGroupKFold enrollment isolation
-    └── test_rf_xgboost_train.py                  # Unit tests for model training and fold metrics
+│       ├── fast_ablation_pipeline.py              # Cross-validation, checkpointing, and resume
+│       ├── rf_xgboost_train.py                    # Shared model and feature-group helpers
+│       └── runners/                               # Binary and multiclass entry points
+└── tests/                                         # Data, model, and enrollment-isolation tests

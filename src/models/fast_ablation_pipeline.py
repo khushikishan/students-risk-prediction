@@ -18,8 +18,17 @@ from threading import Lock
 
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.svm import LinearSVC, SVC
 from threadpoolctl import threadpool_limits
 
 import src.models.rf_xgboost_train as train_mod
@@ -27,7 +36,9 @@ from src.models.rf_xgboost_train import (
     CUTOFFS,
     PROCESSED,
     build_ablation_subsets,
+    build_model,
     get_feature_groups,
+    make_smote_for_fold,
     prepare_cutoff_xy,
 )
 
@@ -940,6 +951,217 @@ def _parse_csv_list(spec: str | None) -> tuple[str, ...] | None:
   if spec is None or spec.strip() == "":
     return None
   return tuple(piece.strip() for piece in spec.split(",") if piece.strip())
+
+
+def build_svm_for_fold(
+    y_tr: np.ndarray,
+    seed: int,
+    svm_kernel: str = "linear",
+    max_calib_folds: int = 2,
+):
+  """Construct a fold-safe calibrated SVM classifier.
+
+  The finished binary experiments call this through ``run_cv_trials_fast``.
+  The resumable ablation uses ``fit_and_score_fold`` instead.
+  """
+  _, counts = np.unique(y_tr, return_counts=True)
+  min_count = int(counts.min())
+  kernel = svm_kernel.lower()
+
+  if kernel == "linear":
+    base_estimator = LinearSVC(
+        C=1.0,
+        dual="auto",
+        max_iter=2000,
+        random_state=seed,
+    )
+  elif kernel == "rbf":
+    base_estimator = SVC(
+        kernel="rbf",
+        C=1.0,
+        gamma="scale",
+        cache_size=512,
+        random_state=seed,
+    )
+  else:
+    raise ValueError(f"Unsupported svm_kernel: {svm_kernel}")
+
+  if min_count < 2:
+    return base_estimator, True
+
+  calib_folds = min(max_calib_folds, min_count)
+  calibrated = CalibratedClassifierCV(
+      estimator=base_estimator,
+      method="sigmoid",
+      cv=calib_folds,
+      ensemble=False,
+  )
+  return calibrated, False
+
+
+def evaluate_fold_metrics_safe(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_prob: np.ndarray,
+    is_multiclass: bool,
+    classes: np.ndarray,
+    scores_are_margins: bool = False,
+) -> dict[str, float]:
+  """Compute precision, recall, F1, and ROC-AUC for binary or multiclass folds."""
+  avg = "macro" if is_multiclass else "binary"
+  precision = precision_score(y_true, y_pred, average=avg, zero_division=0)
+  recall = recall_score(y_true, y_pred, average=avg, zero_division=0)
+  f1 = f1_score(y_true, y_pred, average=avg, zero_division=0)
+
+  try:
+    if is_multiclass:
+      if scores_are_margins:
+        roc_auc = float(
+            np.mean([
+                roc_auc_score(y_true == class_id, y_prob[:, class_id])
+                for class_id in classes
+            ])
+        )
+      else:
+        roc_auc = roc_auc_score(
+            y_true,
+            y_prob,
+            multi_class="ovr",
+            average="macro",
+            labels=classes,
+        )
+    else:
+      if scores_are_margins:
+        positive_scores = y_prob
+      else:
+        prob_arr = np.asarray(y_prob)
+        positive_scores = (
+            prob_arr[:, 1]
+            if prob_arr.ndim == 2 and prob_arr.shape[1] > 1
+            else prob_arr.ravel()
+        )
+      roc_auc = roc_auc_score(y_true, positive_scores)
+  except ValueError:
+    roc_auc = np.nan
+
+  return {
+      "precision": float(precision),
+      "recall": float(recall),
+      "f1": float(f1),
+      "roc_auc": float(roc_auc),
+  }
+
+
+def run_cv_trials_fast(
+    X: pd.DataFrame,
+    y_raw: pd.Series,
+    model_name: str = "rf",
+    task: str = "multiclass",
+    n_trials: int = 25,
+    n_splits: int = 10,
+    base_seed: int = 42,
+    n_estimators: int = 200,
+    n_jobs: int = 1,
+    svm_kernel: str = "linear",
+    svm_calib_folds: int = 2,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+  """Evaluate a classifier over repeated stratified folds with leak-free preprocessing."""
+  if task not in ("multiclass", "binary"):
+    raise ValueError(f"Unsupported task: {task}")
+
+  is_multiclass = task == "multiclass"
+  encoder = LabelEncoder()
+  y = encoder.fit_transform(y_raw.to_numpy())
+  classes = np.arange(len(encoder.classes_))
+  X_arr = X.to_numpy(dtype=float)
+  feature_names = list(X.columns)
+  name = model_name.lower()
+
+  trial_rows = []
+  importances_records = []
+
+  for trial in range(n_trials):
+    trial_seed = base_seed + trial
+    skf = StratifiedKFold(
+        n_splits=n_splits, shuffle=True, random_state=trial_seed
+    )
+    fold_metrics = {"precision": [], "recall": [], "f1": [], "roc_auc": []}
+
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_arr, y)):
+      X_tr_raw, y_tr = X_arr[train_idx], y[train_idx]
+      X_va_raw, y_va = X_arr[val_idx], y[val_idx]
+
+      imputer = SimpleImputer(strategy="median")
+      X_tr_imp = imputer.fit_transform(X_tr_raw)
+      X_va_imp = imputer.transform(X_va_raw)
+
+      if name in ("lr", "svm"):
+        scaler = StandardScaler()
+        X_tr_imp = scaler.fit_transform(X_tr_imp)
+        X_va_imp = scaler.transform(X_va_imp)
+
+      smote = make_smote_for_fold(y_tr, random_state=trial_seed * 100 + fold_idx)
+      if smote is not None:
+        X_tr_fit, y_tr_fit = smote.fit_resample(X_tr_imp, y_tr)
+      else:
+        X_tr_fit, y_tr_fit = X_tr_imp, y_tr
+
+      if name == "svm":
+        clf, svm_uncalibrated = build_svm_for_fold(
+            y_tr=y_tr,
+            seed=trial_seed * 100 + fold_idx,
+            svm_kernel=svm_kernel,
+            max_calib_folds=svm_calib_folds,
+        )
+      else:
+        svm_uncalibrated = False
+        clf = build_model(
+            model_name=name,
+            is_multiclass=is_multiclass,
+            n_classes=len(classes),
+            seed=trial_seed * 100 + fold_idx,
+            n_estimators=n_estimators,
+            n_jobs=n_jobs,
+        )
+
+      clf.fit(X_tr_fit, y_tr_fit)
+      y_pred = clf.predict(X_va_imp)
+      y_prob = (
+          clf.decision_function(X_va_imp)
+          if svm_uncalibrated
+          else clf.predict_proba(X_va_imp)
+      )
+
+      metrics = evaluate_fold_metrics_safe(
+          y_true=y_va,
+          y_pred=y_pred,
+          y_prob=y_prob,
+          is_multiclass=is_multiclass,
+          classes=classes,
+          scores_are_margins=svm_uncalibrated,
+      )
+      for k, v in metrics.items():
+        fold_metrics[k].append(v)
+
+      if hasattr(clf, "feature_importances_"):
+        importances_records.append({
+            "trial": trial,
+            "fold": fold_idx,
+            **{
+                feat: float(imp)
+                for feat, imp in zip(feature_names, clf.feature_importances_)
+            },
+        })
+
+    trial_rows.append({
+        "trial": trial,
+        "precision": float(np.nanmean(fold_metrics["precision"])),
+        "recall": float(np.nanmean(fold_metrics["recall"])),
+        "f1": float(np.nanmean(fold_metrics["f1"])),
+        "roc_auc": float(np.nanmean(fold_metrics["roc_auc"])),
+    })
+
+  return pd.DataFrame(trial_rows), pd.DataFrame(importances_records)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
