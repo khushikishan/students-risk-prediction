@@ -2,6 +2,28 @@
 
 This project uses the Open University Learning Analytics Dataset (OULAD) to predict students who may be at risk of failing or withdrawing from a course. It uses student information, assessment performance, and learning activity to build classification models.
 
+## Run and save on another machine
+
+Copy this branch, `data/processed/combined_features.csv`, and the whole `data/runs/` folder. Every finished fold is already a file under `data/runs/`. Stopping the process keeps those files. The run folder name must contain `59d3fff37215`. A different name means the dataset file does not match.
+
+From the project root, after `python -m pip install -r requirements.txt`:
+
+```bash
+python run_fast_resume.py --task multiclass --track fast
+python run_fast_resume.py --task binary --track fast
+```
+
+SVM uses the linear kernel so it matches the finished binary SVM and skips those cells:
+
+```bash
+python run_fast_resume.py --task multiclass --track svm --svm-kernel linear
+python run_fast_resume.py --task binary --track svm --svm-kernel linear
+```
+
+The same command skips folds already in `data/runs/`. Fast and SVM can run on two machines at the same time. Do not start the same command twice. Progress: `python run_fast_resume.py --status`.
+
+Copy `data/runs/` back, then rebuild the tables with `python run_fast_resume.py --merge-only`. Each run folder gets `summary.csv`. A command also writes `data/processed/<task>_fast_ablation_summary.csv` or `<task>_svm_ablation_summary.csv` when it finishes.
+
 ## Dataset
 
 The project uses the OULAD dataset, which contains student demographics, course registrations, assessment results, and virtual learning environment (VLE) interactions.

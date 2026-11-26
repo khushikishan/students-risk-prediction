@@ -9,6 +9,7 @@ from src.models.fast_ablation_pipeline import (
     FAST_MODELS,
     PROCESSED,
     SVM_MODELS,
+    file_sha256,
     run_ablation_with_resume,
 )
 
@@ -18,12 +19,17 @@ def run_binary_experiment(
     n_trials: int = 25,
     n_splits: int = 10,
     n_estimators: int = 200,
-    n_jobs: int = 1,
-    svm_kernel: str = "linear",
+    n_jobs: int = -1,
+    svm_kernel: str = "rbf",
     cutoffs: tuple[int, ...] = tuple(CUTOFFS),
     dataset_path: Path = PROCESSED / "combined_features.csv",
     summary_out_path: Path | None = None,
     importances_out_path: Path | None = None,
+    feature_groups: tuple[str, ...] | None = None,
+    trials: tuple[int, ...] | None = None,
+    parts_dir: Path | None = None,
+    base_seed: int = 42,
+    svm_cache_size: int = 1024,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
   """Execute the binary at-risk prediction ablation independently."""
   if not dataset_path.exists():
@@ -58,6 +64,12 @@ def run_binary_experiment(
       svm_kernel=svm_kernel,
       summary_out_path=out_summary,
       importances_out_path=out_importances,
+      base_seed=base_seed,
+      feature_groups=feature_groups,
+      trials=trials,
+      parts_dir=parts_dir,
+      dataset_fingerprint=file_sha256(dataset_path),
+      svm_cache_size=svm_cache_size,
   )
 
 
@@ -67,5 +79,5 @@ if __name__ == "__main__":
       n_trials=25,
       n_splits=10,
       n_estimators=200,
-      n_jobs=1,
+      n_jobs=-1,
   )
