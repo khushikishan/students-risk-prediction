@@ -4,7 +4,7 @@ This project uses the Open University Learning Analytics Dataset (OULAD) to pred
 
 ## Run and save on another machine
 
-Copy this branch, `data/processed/combined_features.csv`, and the whole `data/runs/` folder. Every finished fold is already a file under `data/runs/`. Stopping the process keeps those files. The run folder name must contain `59d3fff37215`. A different name means the dataset file does not match.
+Check out this branch. Finished folds are already in `data/runs/`. Also keep `data/processed/combined_features.csv`. Stopping a run keeps every finished fold. The run folder name must contain `59d3fff37215`. A different name means the dataset file does not match.
 
 From the project root, after `python -m pip install -r requirements.txt`:
 
