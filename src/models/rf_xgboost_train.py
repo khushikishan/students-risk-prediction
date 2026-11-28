@@ -13,7 +13,7 @@ from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
+from sklearn.svm import SVC, LinearSVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.calibration import CalibratedClassifierCV
 from imblearn.over_sampling import SMOTE
@@ -99,6 +99,107 @@ def build_model(
   raise ValueError(f"Unsupported model_name: {model_name}")
 
 
+def fit_and_score_fold(
+    X_tr_raw: np.ndarray,
+    y_tr: np.ndarray,
+    X_va_raw: np.ndarray,
+    y_va: np.ndarray,
+    *,
+    model_name: str,
+    is_multiclass: bool,
+    classes: np.ndarray,
+    feature_names: list[str],
+    seed: int,
+    n_estimators: int = 200,
+    n_jobs: int = 1,
+    svm_kernel: str = "rbf",
+    svm_cache_size: int = 200,
+) -> tuple[dict[str, float], dict[str, float] | None]:
+  """Fit one training fold and score its untouched validation fold.
+
+  Imputation, scaling, and SMOTE see training rows only. `svm_cache_size`
+  changes libsvm's memory cache, not the kernel or the regularization.
+  """
+  imputer = SimpleImputer(strategy="median")
+  X_tr_imp = imputer.fit_transform(X_tr_raw)
+  X_va_imp = imputer.transform(X_va_raw)
+
+  if model_name.lower() in ("lr", "svm"):
+    scaler = StandardScaler()
+    X_tr_imp = scaler.fit_transform(X_tr_imp)
+    X_va_imp = scaler.transform(X_va_imp)
+
+  smote = make_smote_for_fold(y_tr, random_state=seed)
+  if smote is not None:
+    X_tr_fit, y_tr_fit = smote.fit_resample(X_tr_imp, y_tr)
+  else:
+    X_tr_fit, y_tr_fit = X_tr_imp, y_tr
+
+  svm_uncalibrated = False
+  if model_name.lower() == "svm":
+    _, counts = np.unique(y_tr, return_counts=True)
+    min_count = int(counts.min())
+
+    if svm_kernel.lower() == "linear":
+      base_estimator = LinearSVC(
+          C=1.0,
+          dual="auto",
+          max_iter=2000,
+          random_state=seed,
+      )
+      max_calibration_folds = 2
+    else:
+      base_estimator = SVC(
+          kernel=svm_kernel,
+          random_state=seed,
+          cache_size=svm_cache_size,
+      )
+      max_calibration_folds = 3
+
+    if min_count < 2:
+      svm_uncalibrated = True
+      clf = base_estimator
+    else:
+      calibration_folds = min(max_calibration_folds, min_count)
+      clf = CalibratedClassifierCV(
+          estimator=base_estimator,
+          cv=calibration_folds,
+          ensemble=False,
+      )
+  else:
+    clf = build_model(
+        model_name=model_name,
+        is_multiclass=is_multiclass,
+        n_classes=len(classes),
+        seed=seed,
+        n_estimators=n_estimators,
+        n_jobs=n_jobs,
+    )
+
+  clf.fit(X_tr_fit, y_tr_fit)
+  y_pred = clf.predict(X_va_imp)
+  y_prob = (
+      clf.decision_function(X_va_imp)
+      if svm_uncalibrated
+      else clf.predict_proba(X_va_imp)
+  )
+  metrics = evaluate_fold_metrics(
+      y_true=y_va,
+      y_pred=y_pred,
+      y_prob=y_prob,
+      is_multiclass=is_multiclass,
+      classes=classes,
+      scores_are_margins=svm_uncalibrated,
+  )
+  importances = None
+  if hasattr(clf, "feature_importances_"):
+    importances = {
+        feat: float(imp)
+        for feat, imp in zip(feature_names, clf.feature_importances_)
+    }
+  return metrics, importances
+
+
 def run_cv_trials(
     X: pd.DataFrame,
     y_raw: pd.Series,
@@ -110,6 +211,8 @@ def run_cv_trials(
     n_estimators: int = 200,
     n_jobs: int = 1,
     groups: pd.Series | np.ndarray | None = None,
+    svm_kernel: str = "rbf",
+    svm_cache_size: int = 200,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
   """Runs `n_trials` repetitions of stratified CV with SMOTE applied strictly
 
@@ -143,90 +246,28 @@ def run_cv_trials(
     fold_metrics = {"precision": [], "recall": [], "f1": [], "roc_auc": []}
 
     for fold_idx, (train_idx, val_idx) in enumerate(split_iter):
-      X_tr_raw, y_tr = X_arr[train_idx], y[train_idx]
-      X_va_raw, y_va = X_arr[val_idx], y[val_idx]
-
-      # Learn missing-value replacements from training rows, then reuse them.
-      # Validation values never influence imputation parameters.
-      imputer = SimpleImputer(strategy="median")
-      X_tr_imp = imputer.fit_transform(X_tr_raw)
-      X_va_imp = imputer.transform(X_va_raw)
-
-      if model_name.lower() in ("lr", "svm"):
-        # Scale only the imputed training fold and apply the same transform.
-        # This keeps validation statistics out of preprocessing.
-        scaler = StandardScaler()
-        X_tr_imp = scaler.fit_transform(X_tr_imp)
-        X_va_imp = scaler.transform(X_va_imp)
-
-      # Resample training data only; validation remains at its natural balance.
-      smote = make_smote_for_fold(y_tr, random_state=trial_seed * 100 + fold_idx)
-      if smote is not None:
-        X_tr_fit, y_tr_fit = smote.fit_resample(X_tr_imp, y_tr)
-      else:
-        X_tr_fit, y_tr_fit = X_tr_imp, y_tr
-
-      svm_uncalibrated = False
-      if model_name.lower() == "svm":
-        _, counts = np.unique(y_tr, return_counts=True)
-        min_count = int(counts.min())
-
-        if min_count < 2:
-          # A singleton class cannot be split into calibration folds.
-          # Use the SVM's decision margins directly for ROC-AUC in this fold.
-          svm_uncalibrated = True
-          clf = SVC(
-              kernel="rbf",
-              random_state=trial_seed * 100 + fold_idx,
-          )
-        else:
-          calibration_folds = min(3, min_count)
-          clf = CalibratedClassifierCV(
-              estimator=SVC(
-                  kernel="rbf",
-                  random_state=trial_seed * 100 + fold_idx,
-              ),
-              cv=calibration_folds,
-              ensemble=False,
-          )
-      else:
-        clf = build_model(
-            model_name=model_name,
-            is_multiclass=is_multiclass,
-            n_classes=len(classes),
-            seed=trial_seed * 100 + fold_idx,
-            n_estimators=n_estimators,
-            n_jobs=n_jobs,
-        )
-
-      clf.fit(X_tr_fit, y_tr_fit)
-
-      y_pred = clf.predict(X_va_imp)
-      y_prob = (
-          clf.decision_function(X_va_imp)
-          if svm_uncalibrated
-          else clf.predict_proba(X_va_imp)
-      )
-
-      metrics = evaluate_fold_metrics(
-          y_true=y_va,
-          y_pred=y_pred,
-          y_prob=y_prob,
+      metrics, importances = fit_and_score_fold(
+          X_arr[train_idx],
+          y[train_idx],
+          X_arr[val_idx],
+          y[val_idx],
+          model_name=model_name,
           is_multiclass=is_multiclass,
           classes=classes,
-          scores_are_margins=svm_uncalibrated,
+          feature_names=feature_names,
+          seed=trial_seed * 100 + fold_idx,
+          n_estimators=n_estimators,
+          n_jobs=n_jobs,
+          svm_kernel=svm_kernel,
+          svm_cache_size=svm_cache_size,
       )
       for k, v in metrics.items():
         fold_metrics[k].append(v)
-
-      if hasattr(clf, "feature_importances_"):
+      if importances is not None:
         importances_records.append({
             "trial": trial,
             "fold": fold_idx,
-            **{
-                feat: float(imp)
-                for feat, imp in zip(feature_names, clf.feature_importances_)
-            },
+            **importances,
         })
 
     trial_rows.append({
@@ -314,51 +355,6 @@ def prepare_cutoff_xy(
   X = sub[feature_cols].copy()
   y = sub[target_col].copy()
   return X, y
-
-
-if __name__ == "__main__":
-  combined_path = PROCESSED / "combined_features.csv"
-  if combined_path.exists():
-    data = pd.read_csv(combined_path)
-    drop_cols = {
-        "code_module",
-        "code_presentation",
-        "id_student",
-        "cutoff",
-        "at_risk",
-        "multiclass_target",
-        "has_history",
-    }
-    numeric_feature_cols = [
-        c
-        for c in data.columns
-        if c not in drop_cols and pd.api.types.is_numeric_dtype(data[c])
-    ]
-
-    summary_rows = []
-    for cutoff in CUTOFFS:
-      X_c, y_c = prepare_cutoff_xy(
-          data, cutoff, numeric_feature_cols, task="multiclass"
-      )
-      for model_key in ("rf", "xgb"):
-        trials_df, _ = run_cv_trials(
-            X_c, y_c, model_name=model_key, task="multiclass", n_trials=25
-        )
-        summary_rows.append({
-            "cutoff": cutoff,
-            "model": model_key,
-            "precision_mean": trials_df["precision"].mean(),
-            "precision_std": trials_df["precision"].std(),
-            "recall_mean": trials_df["recall"].mean(),
-            "recall_std": trials_df["recall"].std(),
-            "f1_mean": trials_df["f1"].mean(),
-            "f1_std": trials_df["f1"].std(),
-            "roc_auc_mean": trials_df["roc_auc"].mean(),
-            "roc_auc_std": trials_df["roc_auc"].std(),
-        })
-
-    summary_df = pd.DataFrame(summary_rows)
-    print(summary_df.to_string(index=False))
 
 
 # To resolve feature groups, we define the expected columns for engagement, interaction, and assessment features.
@@ -563,21 +559,9 @@ def run_ablation_experiments(
 
 
 if __name__ == "__main__":
-  combined_path = PROCESSED / "combined_features.csv"
-  if combined_path.exists():
-    data = pd.read_csv(combined_path)
-    summary_df, rf_imp_df = run_ablation_experiments(
-        df=data,
-        model_names=("rf", "xgb"),
-        task="multiclass",
-        n_trials=25,
-        n_splits=10,
-        base_seed=42,
-        n_estimators=200,
-        n_jobs=1,
-        summary_out_path=PROCESSED / "multiclass_ablation_summary.csv",
-        importances_out_path=PROCESSED / "rf_ablation_feature_importances.csv",
-    )
-    print("Finished full ablation experiment.")
-    print("Summary shape:", summary_df.shape)
-    print("RF importances shape:", rf_imp_df.shape)
+  import sys
+  root = Path(__file__).resolve().parents[2]
+  if str(root) not in sys.path:
+    sys.path.insert(0, str(root))
+  from src.models.fast_ablation_pipeline import main
+  main()

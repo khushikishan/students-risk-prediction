@@ -1,0 +1,1 @@
+{"task": "multiclass", "n_trials": 25, "n_splits": 10, "n_estimators": 200, "base_seed": 42, "dataset_sha256": "59d3fff372152515eb07c3078410cc7e92d522c5dc4553c8d62ea0b211038e77", "svm_kernel": "rbf", "models": ["rf", "xgb", "lr", "nb"], "workers": 4}
