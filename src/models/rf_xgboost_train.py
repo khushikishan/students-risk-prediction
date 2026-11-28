@@ -13,7 +13,7 @@ from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
+from sklearn.svm import SVC, LinearSVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.calibration import CalibratedClassifierCV
 from imblearn.over_sampling import SMOTE
@@ -139,21 +139,30 @@ def fit_and_score_fold(
   if model_name.lower() == "svm":
     _, counts = np.unique(y_tr, return_counts=True)
     min_count = int(counts.min())
-    if min_count < 2:
-      svm_uncalibrated = True
-      clf = SVC(
+
+    if svm_kernel.lower() == "linear":
+      base_estimator = LinearSVC(
+          C=1.0,
+          dual="auto",
+          max_iter=2000,
+          random_state=seed,
+      )
+      max_calibration_folds = 2
+    else:
+      base_estimator = SVC(
           kernel=svm_kernel,
           random_state=seed,
           cache_size=svm_cache_size,
       )
+      max_calibration_folds = 3
+
+    if min_count < 2:
+      svm_uncalibrated = True
+      clf = base_estimator
     else:
-      calibration_folds = min(3, min_count)
+      calibration_folds = min(max_calibration_folds, min_count)
       clf = CalibratedClassifierCV(
-          estimator=SVC(
-              kernel=svm_kernel,
-              random_state=seed,
-              cache_size=svm_cache_size,
-          ),
+          estimator=base_estimator,
           cv=calibration_folds,
           ensemble=False,
       )
